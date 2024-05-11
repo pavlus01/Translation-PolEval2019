@@ -21,4 +21,4 @@ from keras import optimizers
 
 
 def main():
-    print("hey there")
+    print("Loading data...")
