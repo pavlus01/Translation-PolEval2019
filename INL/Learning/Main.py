@@ -2,7 +2,6 @@
 #     print('Hello World')
 
 import warnings
-warnings.filterwarnings("ignore")
 import tensorflow as tf
 import numpy as np
 import string
@@ -18,6 +17,8 @@ from keras.callbacks import ModelCheckpoint
 from keras.preprocessing.sequence import pad_sequences
 from keras.models import load_model
 from keras import optimizers
+warnings.filterwarnings("ignore")
+
 
 
 def main():
