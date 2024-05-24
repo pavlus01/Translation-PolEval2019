@@ -1,53 +1,43 @@
-import warnings
-import gensim
-from keras.src.preprocessing import sequence
-from keras.src.utils import np_utils
-warnings.filterwarnings("ignore")
-import re
 import numpy as np
-import string
-from numpy import array, argmax, random, take
-import tensorflow as tf
 import pandas as pd
 from keras.models import Sequential
 from keras.layers import Dense, LSTM, Embedding, RepeatVector
 from keras.preprocessing.text import Tokenizer
-from keras.callbacks import ModelCheckpoint
 from keras.preprocessing.sequence import pad_sequences
-from keras.models import load_model
-from keras import optimizers
-import matplotlib.pyplot as plt
 from gensim.models import KeyedVectors
 from keras_self_attention import SeqSelfAttention
+from keras.utils import Sequence
 
-LEN_RU = 512
-LEN_PL = 512
+LEN_RU = 128  # Zmniejszenie długości sekwencji
+LEN_PL = 128  # Zmniejszenie długości sekwencji
+BATCH_SIZE = 2  # Zmniejszenie batch size
+VOCAB_SIZE = 20000  # Ograniczenie rozmiaru słownika
+
 
 def main():
     model = Sequential()
 
     model_w2v = KeyedVectors.load_word2vec_format("../W2V_Models/kgr_mwe/v100/skip_gram_v100m8.w2v.txt", binary=False)
     word_vectors = model_w2v.vectors
-    vocab_size = len(word_vectors)
     embedding_dim = model_w2v.vector_size
-    embedding_matrix = np.zeros((vocab_size, embedding_dim))
+    embedding_matrix = np.zeros((VOCAB_SIZE, embedding_dim))
 
-    for i in range(vocab_size):
+    for i in range(min(VOCAB_SIZE, len(word_vectors))):
         embedding_matrix[i] = word_vectors[i]
 
-    embedding_layer = Embedding(input_dim=vocab_size,
+    embedding_layer = Embedding(input_dim=VOCAB_SIZE,
                                 output_dim=embedding_dim,
                                 weights=[embedding_matrix],
                                 trainable=False)
 
     model.add(embedding_layer)
-    model.add(LSTM(512))
+    model.add(LSTM(128))  # Zmniejszenie liczby jednostek LSTM
     model.add(RepeatVector(LEN_RU))
 
     model.add(SeqSelfAttention(attention_activation='sigmoid'))
 
-    model.add(LSTM(512, return_sequences=True))
-    model.add(Dense(vocab_size, activation='softmax'))
+    model.add(LSTM(128, return_sequences=True))  # Zmniejszenie liczby jednostek LSTM
+    model.add(Dense(VOCAB_SIZE, activation='softmax'))
 
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
 
@@ -58,28 +48,22 @@ def main():
 
     X_train, X_test, y_train, y_test = train_test_split(dfPl, dfRu)
 
-    tokenizer_pl = tokenization(X_train['PL'], vocab_size)
-    tokenizer_ru = tokenization(y_train['RU'], vocab_size)
+    tokenizer_pl = tokenization(X_train['PL'], VOCAB_SIZE)
+    tokenizer_ru = tokenization(y_train['RU'], VOCAB_SIZE)
 
-    sequences_trainX = tokenizer_pl.texts_to_sequences(X_train['PL'])
-    sequences_trainY = tokenizer_ru.texts_to_sequences(y_train['RU'])
-    sequences_testX = tokenizer_pl.texts_to_sequences(X_test['PL'])
-    sequences_testY = tokenizer_ru.texts_to_sequences(y_test['RU'])
+    X_train.reset_index(drop=True, inplace=True)
+    y_train.reset_index(drop=True, inplace=True)
+    X_test.reset_index(drop=True, inplace=True)
+    y_test.reset_index(drop=True, inplace=True)
 
-    X_train = pad_sequences(sequences_trainX, maxlen=LEN_PL)
-    Y_train = pad_sequences(sequences_trainY, maxlen=LEN_RU)
-    X_test = pad_sequences(sequences_testX, maxlen=LEN_PL)
-    Y_test = pad_sequences(sequences_testY, maxlen=LEN_RU)
-
-    Y_train = np.expand_dims(Y_train, -1)
-    Y_test = np.expand_dims(Y_test, -1)
+    train_generator = DataGenerator(X_train['PL'], y_train['RU'], BATCH_SIZE, tokenizer_pl, LEN_PL)
+    validation_generator = DataGenerator(X_test['PL'], y_test['RU'], BATCH_SIZE, tokenizer_pl, LEN_PL)
 
     epochs = 5
-    batch_size = 7
 
-    rnn = model.fit(X_train, Y_train, epochs=epochs, batch_size=batch_size, shuffle=True)
+    rnn = model.fit(train_generator, epochs=epochs, validation_data=validation_generator)
 
-    score = model.evaluate(X_test, Y_test)
+    score = model.evaluate(validation_generator)
     print("Test Loss: %.2f%%" % (score[0] * 100))
     print("Test Accuracy: %.2f%%" % (score[1] * 100))
 
@@ -122,29 +106,34 @@ def tokenization(lines, vocab_size):
     tokenizer.fit_on_texts(lines)
     return tokenizer
 
-def encode_sequences(tokenizer, length, lines):
-    seq = tokenizer.texts_to_sequences(lines)
-    seq = pad_sequences(seq, maxlen=length, padding='post')
-    return seq
 
-def Plots(rnn, nb_epoch):
-    plt.figure(0)
-    plt.plot(rnn.history['accuracy'], 'r')
-    plt.xticks(np.arange(0, nb_epoch + 1, nb_epoch / 5))
-    plt.rcParams['figure.figsize'] = (8, 6)
-    plt.xlabel("Num of Epochs")
-    plt.ylabel("Accuracy")
-    plt.title("Training vs Validation Accuracy LSTM l=10, epochs=20")
-    plt.legend(['train', 'validation'])
-    plt.figure(1)
-    plt.plot(rnn.history['loss'], 'r')
-    plt.xticks(np.arange(0, nb_epoch + 1, nb_epoch / 5))
-    plt.rcParams['figure.figsize'] = (8, 6)
-    plt.xlabel("Num of Epochs")
-    plt.ylabel("Training vs Validation Loss LSTM l=10, epochs=20")
-    plt.legend(['train', 'validation'])
-    plt.show()
-    plt.show(block=True)
+class DataGenerator(Sequence):
+    def __init__(self, texts, labels, batch_size, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.batch_size = batch_size
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+        self.indices = np.arange(len(texts))
+
+    def __len__(self):
+        return int(np.ceil(len(self.texts) / self.batch_size))
+
+    def __getitem__(self, index):
+        batch_indices = self.indices[index * self.batch_size:(index + 1) * self.batch_size]
+        print(f"Batch indices: {batch_indices}")  # Dodane logowanie
+        batch_texts = self.texts.iloc[batch_indices].tolist()
+        batch_labels = self.labels.iloc[batch_indices].tolist()
+
+        X = pad_sequences(self.tokenizer.texts_to_sequences(batch_texts), maxlen=self.max_len)
+        Y = pad_sequences(self.tokenizer.texts_to_sequences(batch_labels), maxlen=self.max_len)
+        Y = np.expand_dims(Y, -1)
+
+        return X, Y
+
+    def on_epoch_end(self):
+        np.random.shuffle(self.indices)
+
 
 if __name__ == "__main__":
     main()
